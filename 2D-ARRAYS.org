@@ -1,0 +1,145 @@
+#+TITLE: 2D arrays in jank
+#+STARTUP: overview
+
+Everything marked *[verified]* was actually run in this container.
+Everything marked *[unverified]* is untested --- check before relying on
+it.
+
+* Pick a representation
+|                        | storage                   | probe cost    | use when                                        |
+|------------------------+---------------------------+---------------+-------------------------------------------------|
+| Native C++ buffer      | =cpp/raw= global array    | O(1) index    | grid churns every frame, cells are primitives   |
+| Flat persistent vector | =[v0 v1 ...]=, index math | O(log32 n)    | grid is small, or you want value semantics/undo |
+| Nested vectors         | =[[...] [...]]=           | 2x O(log32 n) | readability matters more than speed             |
+
+For anything cell-per-pixel and mutated per frame, the native buffer is
+the only one that isn't fighting you. jank's persistent collections box
+every element, and the GC is non-moving (no cheap JVM-style nursery), so
+per-frame churn hurts more than it would on the JVM.
+
+Confirmed [verified] against =jank-lang/jank= source (checked both
+~/Repositories/jank and this project's =vendor/jank=): =aget=, =aset=,
+=make-array=, =int-array=, =float-array=, etc. are all unported stubs
+that just =throw=. There is no working Java-style array in jank today,
+so =cpp/raw= isn't merely the fastest option here, it's the only one
+that gives you a real mutable primitive array.
+
+* Native buffer recipe [verified]
+#+begin_src clojure
+(ns fnm.grid)
+
+(cpp/raw "
+namespace g {
+  constexpr int ROWS = 200, COLS = 160, N = ROWS * COLS;
+  int   cells[N];
+  float vel[N];
+
+  void  clear()              { for (int i=0;i<N;++i){ cells[i]=0; vel[i]=0.0f; } }
+  int   get(int i)           { return cells[i]; }
+  void  set(int i, int v)    { cells[i] = v; }
+  float getv(int i)          { return vel[i]; }
+  void  setv(int i, float v) { vel[i] = v; }
+}
+")
+
+(def ^:const rows 200)
+(def ^:const cols 160)
+(defn idx [row col] (+ (* row cols) col))
+
+(cpp/g.set (idx 3 4) 42)
+(cpp/g.get (idx 3 4))          ;=> 42
+#+end_src
+
+Notes:
+
+- Wrap in a =namespace= and call with a dot: =cpp/g.set=. [verified]
+- =int= and =float= round-trip both directions. [verified]
+- Size the array with =constexpr=, not a plain =int= --- it's an array
+  bound.
+- Re-evaluating the identical =cpp/raw= block is a *no-op*: the buffer
+  keeps its contents. So =C-c C-k= from the editor doesn't wipe your
+  grid mid-session. [verified, same-process only]
+- Keep the C++ side dumb --- storage plus accessors. Logic belongs in
+  jank so you can redefine it live.
+
+* Put in C++ only what jank is bad at
+Three cases worth a helper rather than fighting the interop:
+
+#+begin_src cpp
+// 1. structs built from computed bytes
+void draw_cell(int x, int y, int s, int hex) {
+  Color c { (unsigned char)(hex >> 16), (unsigned char)((hex >> 8) & 0xFF),
+            (unsigned char)(hex & 0xFF), 255 };
+  DrawRectangle(x, y, s, s, c);
+}
+// 2. field access on a returned struct
+int mouse_row(int cell) { return (int)GetMousePosition().y / cell; }
+// 3. anything needing the C stdlib
+int coin() { return rand() % 2; }
+#+end_src
+
+Passing a whole struct by value, and feeding a returned struct straight
+into another call, both work fine ---
+=(cpp/DrawText s x y n (cpp/ColorFromHSV h 0.6 0.6))=. [verified] It's
+only /constructing/ one from computed parts that wants a helper.
+
+* Iterating from jank
+Scanning is fast enough to stay in jank. Measured: full 32,000-cell
+bottom-up scan with 8,000 live cells, all loops in jank, calling through
+the accessors above --- *1.9 ms per frame*, against a 16.6 ms budget at
+60fps. [verified] Don't move the loop into C++ until you've measured a
+reason to.
+
+#+begin_src clojure
+;; row-major forward
+(dotimes [row rows]
+  (dotimes [col cols]
+    (let [c (cpp/g.get (idx row col))]
+      (when-not (zero? c)
+        ...))))
+
+;; bottom-up (order matters for anything that falls)
+(loop [row (dec rows)]
+  (when (>= row 0)
+    (dotimes [col cols] (step row col))
+    (recur (dec row))))
+#+end_src
+
+=recur= for the outer loop, =dotimes= for the inner. There's no
+=for=-with-=:while= escape hatch worth relying on here.
+
+* Numeric gotchas that bite on index math
+- *Both =mod= and =rem= return doubles* in the apt-installed jank build
+  used by this project's container (=fnm-jank:latest=). =(mod 5 4)= and
+  =(rem 5 4)= are both =1.0=, and =nth=/vector indexing rejects that
+  with "nth on a vector must be an integer; found 1.0". [verified in
+  this project's container --- contradicts the =vendor/jank= source
+  checkout, whose native =rem= looks like it should return an integer
+  for two integer args; the running binary evidently doesn't match that
+  checkout]. Wrap the result: =(long (rem a b))=.
+- =(int 3.9)= truncates to =3=, works on doubles. [verified]
+- =(int \A)= throws. Use =long= for chars.
+- =(vec ["a"])= throws; =(into [] xs)= works. =(vec (range 3))= is fine.
+- Syntax-quote macros with =~@= fail: "Unsupported object for reparsing
+  'cons'". Pass thunks to a plain =defn= instead. [verified]
+- =quot=, =bit-shift-right=, =bit-and= --- *[unverified]*, I didn't get
+  the probe back.
+
+* If you want value semantics anyway
+Flat vector plus the same =idx= fn is much better than nested vectors
+--- one lookup instead of two, and =assoc= at a flat index is a single
+path copy:
+
+#+begin_src clojure
+(def grid (into [] (repeat (* rows cols) 0)))
+(nth grid (idx r c))
+(assoc grid (idx r c) 42)
+#+end_src
+
+Use =transient=/=assoc!=/=persistent!= for a batch of writes in one
+frame. [verified] --- =transient=, =assoc!=, =conj!=, and =persistent!=
+are implemented natively (see =transient_vector= in the jank runtime)
+and even inlined for performance.
+
+Nested =[[..][..]]= with =get-in=/=assoc-in= reads nicest and is the
+slowest. Fine for a chessboard, not for a particle grid.

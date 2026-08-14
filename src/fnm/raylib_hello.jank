@@ -1,0 +1,111 @@
+(ns fnm.raylib-hello
+  (:include "raylib.h"))
+
+(def ^:const screen-width 500)
+(def ^:const screen-height 800)
+
+(def ^:const cell-size 5)
+(def ^:const gravity 0.5)
+(def ^:const rows (/ screen-height cell-size))
+(def ^:const cols (/ screen-width cell-size))
+(def yellow 0xE6B800FF)
+(def blue   0x3B6E8CFF)
+(def red    0xA83232FF)
+(def orange 0xCC6B1FFF)
+(def colors [yellow blue red orange])
+(def brush-size 10)
+
+(defonce zero-grid (into [] (repeat rows (into [] (repeat cols 0)))))
+
+(defonce default-state {:current-color 0
+                        :grid zero-grid
+                        :velocity zero-grid})
+(defonce state (atom default-state))
+
+(defn- game-update []
+  (when (cpp/IsKeyPressed cpp/KEY_R)
+    (swap! state assoc :grid zero-grid :velocity zero-grid))
+  (when (cpp/IsMouseButtonDown cpp/MOUSE_BUTTON_LEFT)
+    (let [mouse-pos (cpp/GetMousePosition)
+          row (/ (int (.-y mouse-pos)) cell-size)
+          col (/ (int (.-x mouse-pos)) cell-size)
+          half (/ brush-size 2)]
+      (doseq [x (range brush-size)
+              y (range brush-size)
+              :let [new-row (+ y (- row half))
+                    new-col (+ x (- col half))]]
+        (when (and (< -1 new-row (dec rows))
+                   (< -1 new-col (dec cols))
+                   (zero? (get-in (:grid @state) [new-row new-col]))
+                   (< (rand) 0.5))
+          (swap! state
+                 (fn [s]
+                   (-> s
+                       (assoc-in [:grid new-row new-col] (get colors (:current-color @state)))
+                       (assoc-in [:velocity new-row new-col] 1.0))))))))
+  (when (cpp/IsMouseButtonReleased cpp/MOUSE_BUTTON_LEFT)
+    (swap! state update :current-color #(int (mod (inc %) (count colors)))))
+
+  (doseq [row (range (- rows 2) -1 -1)
+          col (range cols)
+          :let [{:keys [grid velocity]} @state
+                cell-color (get-in grid [row col])]
+          :when (pos? cell-color)
+          :let [vel (+ gravity (get-in velocity [row col]))
+                new-row (min (dec rows) (+ row (int vel)))]]
+    (loop [y new-row]
+      (if (<= y row)
+        (swap! state assoc-in [:velocity row col] 0.0)
+        (if (not (pos? (get-in grid [y col])))
+          (swap! state
+                 (fn [s]
+                   (-> s
+                       (assoc-in [:grid y col] (get-in s [:grid row col]))
+                       (assoc-in [:grid row col] 0)
+                       (assoc-in [:velocity y col] vel)
+                       (assoc-in [:velocity row col] 0))))
+          (let [can-left (and (pos? col)
+                              (not (pos? (get-in grid [y (dec col)]))))
+                can-right (and (< col (dec cols))
+                               (not (pos? (get-in grid [y (inc col)]))))
+                side (cond
+                       (and can-left (not can-right)) -1
+                       (and (not can-left) can-right)  1
+                       (and can-left can-right)       (if (< (rand) 0.5) 1 -1))]
+            (if (not (or can-left can-right))
+              (recur (dec y))
+              (swap! state
+                     (fn [s]
+                       (let [c (get-in s [:grid row col])]
+                         (-> s
+                             (assoc-in [:grid y (+ col side)] c)
+                             (assoc-in [:grid row col] 0)
+                             (assoc-in [:velocity y (+ col side)] vel)
+                             (assoc-in [:velocity row col] 0.0))))))))))))
+
+(defn- game-draw []
+  (cpp/ClearBackground cpp/BLACK)
+  (doseq [row (range rows)
+          col (range cols)]
+    (let [color (get-in (:grid @state) [row col])]
+      (if (not (zero? color))
+        (cpp/DrawRectangle (* col cell-size) (* row cell-size) cell-size cell-size (cpp/GetColor color))))))
+
+(defn -main [& args]
+  (cpp/SetTraceLogLevel cpp/LOG_WARNING);
+
+  (cpp/InitWindow screen-width screen-height "SAND")
+  (cpp/SetTargetFPS 60)
+  (while (cpp/! (cpp/WindowShouldClose))
+    (game-update)
+    (cpp/BeginDrawing)
+    (game-draw)
+    (cpp/EndDrawing))
+  (cpp/CloseWindow))
+
+(comment
+  (do
+    (reset! state default-state)
+    (future (-main)))
+  :-)
+

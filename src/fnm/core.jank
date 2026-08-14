@@ -1,0 +1,9 @@
+; Keep this file ASCII-only: the jank 0.1-alpha lexer crashes on non-ASCII
+; characters in string literals AND in comments.
+(ns fnm.core)
+
+(defn greet [name]
+  (str "hello, " name))
+
+(defn -main [& args]
+  (println (greet (or (first args) "fnm"))))

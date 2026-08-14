@@ -1,0 +1,157 @@
+; ASCII-only (jank 0.1-alpha lexer limitation).
+;
+; Port of ~/Development/raylib-cpp/sandbuf.cpp.
+;
+; Split: the two 200x160 buffers live in C++ (a flat array is what this
+; algorithm wants, and jank's persistent collections would box every cell),
+; everything else - physics, input, draw - is jank, so it can be redefined
+; from the REPL while the window runs.
+;
+;   ./raylib.sh run-main fnm.sand
+(ns fnm.sand
+  (:include "raylib.h"))
+
+(def ^:const screen-width 800)
+(def ^:const screen-height 1000)
+(def ^:const cell-size 5)
+(def ^:const rows 200)                  ; screen-height / cell-size
+(def ^:const cols 160)                  ; screen-width / cell-size
+(def ^:const gravity 0.1)
+(def ^:const brush 10)
+
+(def colors [0xE6B800 0x3B6E8C 0xA83232 0xCC6B1F])
+(def state (atom {:color-idx 0}))
+
+;; Native side. Only the things jank is a bad fit for:
+;;   - the grid/velocity buffers themselves
+;;   - packing a Color out of computed bytes
+;;   - reading Vector2 fields off GetMousePosition's return value
+;; Re-evaluating this block is a no-op in an already-running process, so a
+;; C-c C-k from the editor does NOT wipe the grid.
+(cpp/raw "
+namespace sandbuf {
+  constexpr int ROWS = 200, COLS = 160, N = ROWS * COLS;
+  // inline (C++17 vague linkage) on both the buffers and the accessors: without
+  // it these are external symbols that exist only in the JIT process, so an AOT
+  // compile-module emits a .o full of undefined sandbuf:: refs that fails to load.
+  inline int grid[N];
+  inline float vel[N];
+
+  inline void  clear()                { for (int i = 0; i < N; ++i) { grid[i] = 0; vel[i] = 0.0f; } }
+  inline int   get(int i)             { return grid[i]; }
+  inline void  set(int i, int v)      { grid[i] = v; }
+  inline float getv(int i)            { return vel[i]; }
+  inline void  setv(int i, float v)   { vel[i] = v; }
+
+  inline int   coin()                 { return rand() % 2; }
+  inline void  seed()                 { srand((unsigned)time(nullptr)); }
+
+  inline int   mouse_row(int cell)    { return (int)GetMousePosition().y / cell; }
+  inline int   mouse_col(int cell)    { return (int)GetMousePosition().x / cell; }
+
+  inline void draw_cell(int x, int y, int s, int hex) {
+    Color c { (unsigned char)(hex >> 16), (unsigned char)((hex >> 8) & 0xFF),
+              (unsigned char)(hex & 0xFF), 255 };
+    DrawRectangle(x, y, s, s, c);
+  }
+}
+")
+
+(defn idx [row col] (+ (* row cols) col))
+
+(defn step-cell [row col]
+  (let [i (idx row col)
+        c (cpp/sandbuf.get i)]
+    (when (and (not (zero? c)) (< row (dec rows)))
+      (let [v      (+ (cpp/sandbuf.getv i) gravity)
+            target (min (dec rows) (+ row (int v)))]
+        (loop [y target]
+          (if (<= y row)
+            ; Blocked all the way back to the start: park the grain by zeroing
+            ; its velocity. Without this it keeps its landing velocity forever
+            ; and rescans int(vel) cells every frame, so settled sand never
+            ; stops costing work and the sim degrades as the pile grows.
+            (cpp/sandbuf.setv i 0.0)
+            (let [j (idx y col)]
+              (if (zero? (cpp/sandbuf.get j))
+                (do (cpp/sandbuf.set j c)
+                    (cpp/sandbuf.set i 0)
+                    (cpp/sandbuf.setv i 0.0)
+                    (cpp/sandbuf.setv j v))
+                (let [can-left  (and (> col 0) (zero? (cpp/sandbuf.get (dec j))))
+                      can-right (and (< col (dec cols)) (zero? (cpp/sandbuf.get (inc j))))
+                      side      (cond (and can-left (not can-right)) -1
+                                      (and can-right (not can-left)) 1
+                                      can-left (if (zero? (cpp/sandbuf.coin)) 1 -1)
+                                      :else 0)]
+                  (if (or can-left can-right)
+                    (do (cpp/sandbuf.set (+ j side) c)
+                        (cpp/sandbuf.set i 0)
+                        (cpp/sandbuf.setv i 0.0)
+                        (cpp/sandbuf.setv (+ j side) v))
+                    (recur (dec y))))))))))))
+
+(defn physics []
+  (loop [row (dec rows)]
+    (when (>= row 0)
+      (dotimes [col cols]
+        (step-cell row col))
+      (recur (dec row)))))
+
+(defn paint []
+  (let [row  (cpp/sandbuf.mouse_row cell-size)
+        col  (cpp/sandbuf.mouse_col cell-size)
+        half (long (quot brush 2))
+        c    (nth colors (:color-idx @state))]
+    (dotimes [x brush]
+      (dotimes [y brush]
+        (let [nr (+ row (- y half))
+              nc (+ col (- x half))]
+          (when (and (>= nr 0) (< nr (dec rows))
+                     (>= nc 0) (< nc (dec cols)))
+            (let [i (idx nr nc)]
+              (when (and (zero? (cpp/sandbuf.get i))
+                         (pos? (cpp/sandbuf.coin)))
+                (cpp/sandbuf.set i c)
+                (cpp/sandbuf.setv i 1.0)))))))))
+
+(defn handle-input []
+  (when (cpp/IsKeyPressed cpp/KEY_R)
+    (cpp/sandbuf.clear))
+  (when (cpp/IsMouseButtonDown cpp/MOUSE_BUTTON_LEFT)
+    (paint))
+  (when (cpp/IsMouseButtonReleased cpp/MOUSE_BUTTON_LEFT)
+    ; both mod and rem return doubles in this container's jank, and nth rejects
+    ; 1.0 -- so the long wrap is what actually matters, not the rem/mod choice
+    (swap! state update :color-idx (fn [n] (long (rem (inc n) (count colors)))))))
+
+(defn draw []
+  (cpp/ClearBackground cpp/BLACK)
+  (dotimes [row rows]
+    (dotimes [col cols]
+      (let [c (cpp/sandbuf.get (idx row col))]
+        (when-not (zero? c)
+          (cpp/sandbuf.draw_cell (* col cell-size) (* row cell-size) cell-size c))))))
+
+(defn frame []
+  (handle-input)
+  (physics)
+  (cpp/BeginDrawing)
+  (draw)
+  (cpp/EndDrawing))
+
+(defn -main [& args]
+  (cpp/sandbuf.seed)
+  (cpp/SetTraceLogLevel cpp/LOG_WARNING)
+  (cpp/InitWindow screen-width screen-height "SAND")
+  (cpp/SetTargetFPS 60)
+  (while (cpp/! (cpp/WindowShouldClose))
+    ; every frame goes through the var, so redefining frame/draw/physics at
+    ; the REPL takes effect on the next frame
+    (frame))
+  (cpp/CloseWindow))
+
+(comment
+  (future (-main))
+  (cpp/sandbuf.clear)
+  :-)

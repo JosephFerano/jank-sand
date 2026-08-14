@@ -1,0 +1,12 @@
+; ASCII-only (jank 0.1-alpha lexer limitation).
+(ns fnm.core-test
+  (:require [clojure.test :refer [deftest testing is run-tests successful?]]
+            [fnm.core :as core]))
+
+(deftest greet-test
+  (testing "greets the given name"
+    (is (= "hello, world" (core/greet "world")))))
+
+; jank 0.1-alpha: (run-tests) with no args crashes; pass the quoted ns.
+(let [summary (run-tests 'fnm.core-test)]
+  (assert (successful? summary) "fnm tests failed"))

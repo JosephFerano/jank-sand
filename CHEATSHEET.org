@@ -1,0 +1,114 @@
+#+TITLE: fnm cheatsheet
+#+STARTUP: overview
+
+jank runs in a podman container (=fnm-jank:latest=). The prebuilt jank
+binary bakes in Ubuntu include paths and can't JIT on Fedora, so never
+run =jank= on the host. This project is mounted at =/work= inside ---
+host =./src= is =/work/src=.
+
+* Image
+#+begin_src sh
+# Build / rebuild. --no-cache --pull is REQUIRED to actually get a newer jank:
+# the PPA calls every build "0.1", so a cached build silently reuses the old binary.
+podman build --no-cache --pull -t fnm-jank:latest -f Containerfile .
+
+# Which jank did I get? There is no --version; check the binary's date.
+podman run --rm fnm-jank:latest ls -l /usr/local/bin/jank
+#+end_src
+
+Takes a few minutes: jank from apt, then raylib 6.0 built from source.
+
+* Daily commands
+#+begin_src sh
+./jank.sh check-health                                  # JIT + AOT sanity check
+./jank.sh --module-path /work/src run-main fnm.core     # run a ns's -main
+./jank.sh --module-path /work/src run-main fnm.core -- world   # ...with args
+./jank.sh run /work/src/fnm/core.jank                   # run a file
+./test.sh                                               # test suite
+./repl.sh                                               # REPL + nREPL (host-reachable)
+./raylib.sh run-main fnm.raylib-hello                   # anything using raylib
+#+end_src
+
+- =--module-path /work/src= is *required* for =run-main=; without it you
+  get =Unable to find module 'fnm.core'=. =repl.sh= and =raylib.sh=
+  already include it.
+- Args after the ns need a literal =--= separator, else jank rejects
+  "Extra positional args".
+- Paths passed to jank are *container* paths (=/work/...=), not host
+  paths.
+
+* raylib
+=./raylib.sh= adds X11 forwarding, =--device /dev/dri=, and
+=-I/usr/local/include -L/usr/local/lib -l raylib=.
+
+#+begin_src sh
+./raylib.sh run-main fnm.raylib-hello
+#+end_src
+
+No =xhost= needed: rootless podman maps container-root to your uid, so
+the X server already sees the client as =joe= (=xhost= lists
+=SI:localuser:joe=). If you ever do get "cannot open display",
+=xhost +local:= is the escape hatch.
+
+Healthy startup logs
+=PLATFORM: DESKTOP (GLFW - X11): Initialized successfully=. If GL fails,
+=LIBGL_ALWAYS_SOFTWARE=1 ./raylib.sh ...= falls back to llvmpipe.
+
+Interop idioms (see =src/fnm/raylib_hello.jank=):
+
+#+begin_src clojure
+(ns fnm.raylib-hello
+  (:include "raylib.h"))          ; NOT (cpp/raw "#include ...")
+
+(cpp/ClearBackground cpp/RAYWHITE)              ; raylib Color macros pass by value
+(cpp/DrawText "hi" 10 10 20 (cpp/ColorFromHSV h 0.6 0.6))  ; so do returned structs
+(while (cpp/! (cpp/WindowShouldClose)) ...)     ; cpp/! is C++ logical-not
+#+end_src
+
+* jank-alpha gotchas
+- *Source must be pure ASCII* --- a non-ASCII char anywhere, /including
+  comments/, crashes the lexer with "Unterminated string".
+- No =slurp=/=spit=/=load-file=. File IO needs C++ interop.
+- =(vec ["a"])= throws; use =(into [] xs)=. =(vec (range 3))= is fine.
+- =(int \A)= throws; use =(long \A)=.
+- =(run-tests)= with no args crashes; call =(run-tests 'fnm.core-test)=.
+- =(clojure.string/split-lines s)= crashes; use
+  =(clojure.string/split s #"\n")=.
+- =(keys m)= returns something =vec= rejects --- iterate it with
+  =reduce=/=some=.
+
+* Adding another native library
+It must be built *inside* the container (Fedora host =.so= files need a
+newer glibc than Ubuntu 24.04 has). Either add a layer to
+=Containerfile=, or build it inside the container with =--prefix=
+pointing at a host path under this project, since =$HOME= is visible.
+Then pass =-I<inc> -L<lib> -l<name>= to jank.
+
+The idiomatic alternative is jank's own build system (=lein-jank= + a
+=jank-build.bb= printing =jank-build::include-dir== / =link-dir== /
+=link-library== directives). Not used here: it needs Leiningen and
+therefore a JVM in the image. Babashka itself is a native binary and
+needs no JVM.
+
+* Debugging a GUI run
+#+begin_src sh
+xdotool search --name "^fnm raylib hello$"     # find the window
+xdotool key --window $wid Escape               # clean exit -> "Window closed successfully"
+#+end_src
+
+Do *not* use =xdotool windowclose=: it sends XDestroyWindow, yanking the
+window out from under raylib, which then dies with a BadWindow X error
+and exit 1. That's the harness, not a bug in your code.
+
+* Isolation from fide
+=~/Development/fide/jank-version= uses different images (=jank:latest=,
+=jank-sdl:latest=) and a different cache volume (=jank-cache= vs
+=fnm-jank-cache=). Nothing is shared, so rebuilding here can't disturb
+fide's pinned render golden. Separate caches matter because jank's PCH
+directory is a hash of compiler /flags/, not of the jank build.
+
+Note: fide's own =Containerfile= no longer builds --- it curls
+=jank.list= from the PPA, which still serves the old flat-repo line
+after the PPA moved to a =dists/= layout, so =apt-get update= 404s. Fix
+is the same =echo "deb ... $(lsb_release -cs) main"= line used in this
+project's Containerfile.

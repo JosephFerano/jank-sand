@@ -1,0 +1,30 @@
+; ASCII-only (jank 0.1-alpha lexer limitation).
+; Same shape as the Clojure/rayclj boids example: state in an atom, the loop on
+; a future, and every frame going through a VAR so redefining it from the REPL
+; takes effect on the next frame without restarting the window.
+(ns fnm.game
+  (:include "raylib.h"))
+
+(def state (atom {:hue 0.0}))
+
+(defn update-state [s]
+  (update s :hue (fn [h] (mod (+ h 1.5) 360.0))))
+
+(defn draw [s]
+  (cpp/ClearBackground cpp/RAYWHITE)
+  (cpp/DrawText "edit me from the repl" 150 200 24
+                (cpp/ColorFromHSV (:hue s) 0.6 0.6)))
+
+(defn game-loop []
+  (while (cpp/! (cpp/WindowShouldClose))
+    (swap! state update-state)
+    (cpp/BeginDrawing)
+    ; called via the var, so (defn draw ...) at the REPL is picked up live
+    (draw @state)
+    (cpp/EndDrawing))
+  (cpp/CloseWindow))
+
+(defn -main [& args]
+  (cpp/InitWindow 800 450 "fnm game")
+  (cpp/SetTargetFPS 60)
+  (game-loop))

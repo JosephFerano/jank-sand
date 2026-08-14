@@ -1,0 +1,112 @@
+#+TITLE: jank ecosystem notes
+#+STARTUP: overview
+
+Extracted from a Clojurians Slack thread (jank channel) about Kyle Cesare's
+nREPL server. Participants: Kyle Cesare (author), jeaye (jank author), Saket,
+Emma Griffin, Monty Bichouna, Mateo Difranco, Joseph Ferano.
+
+* DATING CAVEAT                                                       :meta:
+The thread refers to "Q1 2026" and "closer to the end of the year" as *future*,
+so it most likely dates from 2025 - roughly a year before it was filed here
+(2026-08-13). Treat every "currently broken" claim as a lead to re-verify, not
+as current fact. In particular jeaye's in-progress interop/crash fixes have had
+a year to land; the jank build in this project is from 2026-08-01.
+
+* kylc/jank-nrepl-server
+https://github.com/kylc/jank-nrepl-server
+
+- An nREPL server written *mostly in jank*, with C++ for missing functionality
+  and for driving Boost.Asio.
+- Distinct from the nREPL server already built into the ~jank~ binary (which is
+  what ~repl.sh~ in this project starts).
+- Kyle marks problems inline with ~TODO(jank)~ comments - missing functionality
+  and compiler crashes. Useful as a catalogue of alpha rough edges.
+- jeaye wants it upstreamed into the jank repo; Kyle has taken ownership of
+  continued development. jeaye offered a regular sync; Kyle declined for now
+  but keeps the offer open.
+- Kyle's stated blocker for a project this size is interop edge cases, not
+  design.
+- Longer-term goal: delete the C++ ~nrepl_server~ shared library and use
+  ~(cpp/raw "#include <boost/asio.hpp>")~ directly. Blocked, see below.
+
+* Compiler workarounds that actually work                        :actionable:
+Kyle, on appeasing the alpha compiler. These are the highest-value takeaways.
+
+- Rearrange imports.
+- Insert do-nothing ~(cpp/raw "")~ statements.
+- Collapse everything into a single ~.jank~ file.
+
+jeaye's explanation of *why* the empty-~cpp/raw~ trick works:
+
+#+begin_quote
+Clang is a beast which was not designed to be used as a library for JIT C++. It
+can get into bad states very easily and often times that leads to the next thing
+it parses failing no matter what (hence the empty cpp/raw trick).
+#+end_quote
+
+So a failure is often positional, not semantic: the construct that reports the
+error may be fine, and the real cause is that the compiler was already wedged.
+Reorder or insert a barrier before assuming your code is wrong.
+
+jeaye said he has work in place to do some of this automatically, plus broader
+interop fixes being codified as tests.
+
+* Boost.Asio cannot be JIT-included                                   :bug:
+~(cpp/raw "#include <boost/asio.hpp>")~ fails. Saket suggested it was just a
+missing ~-I path/to/boost~; Kyle confirmed it is deeper than the include path.
+
+Representative errors - note these are *access-control* errors, not template
+soup:
+
+#+begin_example
+/usr/include/boost/asio/impl/cancellation_signal.ipp:82:20:
+  error: 'auto_delete_helper' is a private member of 'boost::asio::cancellation_slot'
+/usr/include/boost/asio/impl/io_context.ipp:49:13:
+  error: 'impl_type' is a private member of 'boost::asio::io_context'
+#+end_example
+
+Out-of-line definitions of private nested members fail to see their own access
+context - i.e. JIT Clang is losing the enclosing-class relationship that normal
+Clang keeps.
+
+jeaye:
+#+begin_quote
+It blows my mind that this type of error would happen in JIT Clang, but not
+normal Clang. I suspect there's some environment setup which we need to tweak in
+order to keep things consistent.
+#+end_quote
+
+Stated goal: anything includable with normal Clang should be includable in jank,
+given the right ~-D~ and ~-I~ flags. Worth re-testing against a current build
+before designing around it.
+
+* How to help jank                                                   :process:
+jeaye's explicit ask, and the most efficient way to get an interop bug fixed:
+reduce it to a *5-10 line* reproduction and file an issue. He turns each repro
+into a test case. He flagged that this is a chore and that keeping your own
+momentum matters more.
+
+* Editor / tooling status
+- The built-in jank nREPL is documented as tested with *both CIDER and Conjure*.
+- Kyle uses Emacs.
+- Conjure did not have jank support at the time; jeaye pinged Ollie:
+  https://github.com/Olical/conjure/issues/610
+- jank writes a ~.nrepl-port~ file, which most nREPL tooling discovers
+  automatically.
+
+* GitHub syntax highlighting for .jank
+- Proper support means github-linguist. Adding an extension to an *existing*
+  language (Clojure) still requires *200 repos* using it:
+  https://github.com/github-linguist/linguist/blob/main/CONTRIBUTING.md#adding-an-extension-to-a-language
+- jeaye made the case and hit that threshold; conclusion was to wait for a
+  stronger presence. Including ~.cljc~ was floated as an alternative.
+- WORKAROUND, works today, per-repo: a ~.gitattributes~ file. Example:
+  https://github.com/kylc/jank-nrepl-server/blob/master/.gitattributes
+  Worth copying into this project and into fide.
+
+* Notes relevant to my own work
+- Joe (me), in-thread: currently using Odin for low-level/games/graphics; the
+  draw of jank is unifying that with Clojure. That is exactly the fnm/fide
+  thesis - see the raylib work in this project.
+- jeaye, on the current cost of adopting jank: "It takes bravery, right now."
+  and expects it to ease "as we get closer to the end of the year".
