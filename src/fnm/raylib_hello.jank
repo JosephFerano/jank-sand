@@ -55,7 +55,8 @@
                 new-row (min (dec rows) (+ row (int vel)))]]
     (loop [y new-row]
       (if (<= y row)
-        (swap! state assoc-in [:velocity row col] 0.0)
+        (when-not (zero? (get-in velocity [row col]))
+          (swap! state assoc-in [:velocity row col] 0.0))
         (if (not (pos? (get-in grid [y col])))
           (swap! state
                  (fn [s]
