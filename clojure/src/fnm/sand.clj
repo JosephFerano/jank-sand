@@ -32,8 +32,8 @@
   "Needs a GL context, so this runs after init-window!."
   []
   (let [tex (rl/load-texture-from-image
-             {:data px :width cols :height rows
-              :mipmaps 1 :format rl/pixelformat-r8g8b8a8})]
+              {:data px :width cols :height rows
+               :mipmaps 1 :format rl/pixelformat-r8g8b8a8})]
     (rl/set-texture-filter! tex rl/texture-filter-point)
     (reset! gpu {:tex    (rl/texture-seg tex)
                  :src    (rl/rect-seg 0 0 cols rows)
@@ -68,10 +68,10 @@
                 (let [can-left  (and (> col 0) (zero? (aget g (dec j))))
                       can-right (and (< col (dec cols)) (zero? (aget g (inc j))))
                       side      (long
-                                 (cond (and can-left (not can-right)) -1
-                                      (and can-right (not can-left)) 1
-                                      can-left (if (zero? (.nextInt (java.util.concurrent.ThreadLocalRandom/current) 2)) 1 -1)
-                                       :else 0))]
+                                  (cond (and can-left (not can-right)) -1
+                                        (and can-right (not can-left)) 1
+                                        can-left (if (zero? (.nextInt (java.util.concurrent.ThreadLocalRandom/current) 2)) 1 -1)
+                                        :else 0))]
                   (if (or can-left can-right)
                     (do (aset g (+ j side) c)
                         (aset g i (int 0))
@@ -133,8 +133,15 @@
   (handle-input!)
   (physics)
   (rl/begin-drawing!)
-  (draw)
-  (rl/end-drawing!))
+  ;; finally, not catch: if we bail out of a half-drawn frame, rlgl still needs
+  ;; the begin/end pair or the next frame inherits corrupt state.
+  (try (draw)
+       (finally (rl/end-drawing!))))
+
+;; Throwable, not Exception: quitting the CIDER debugger aborts the eval by
+;; throwing, and that unwinds all the way out of the loop. Stash it here so it
+;; isn't swallowed silently by the future in the comment block below.
+(defonce last-error (atom nil))
 
 (defn -main [& _args]
   (rl/set-trace-log-level! rl/log-warning)
@@ -142,7 +149,8 @@
   (rl/set-target-fps! 120)
   (init-gpu!)
   (while (not (rl/window-should-close?))
-    (frame))
+    (try (frame)
+         (catch Throwable t (reset! last-error t))))
   (rl/close-window!))
 
 (comment
