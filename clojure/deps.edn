@@ -1,0 +1,20 @@
+{:paths ["src"]
+ :deps  {org.clojure/clojure {:mvn/version "1.12.1"}
+         org.suskalo/coffi   {:mvn/version "1.0.615"}}
+
+ ;; raylib 6.0.0 -- Odin's bundled build, so this links the same binary as ../odin.
+ ;; Repoint -Draylib.path to swap versions; the struct layouts in fnm.rl were
+ ;; written against raylib 6.0's raylib.h.
+ :aliases
+ {:run
+  {:jvm-opts  ["--enable-native-access=ALL-UNNAMED"
+               "-Draylib.path=/home/joe/.local/bin/odin/vendor/raylib/linux/libraylib.so.600"]
+   :main-opts ["-m" "fnm.sand"]}
+
+  :nrepl
+  {:jvm-opts   ["--enable-native-access=ALL-UNNAMED"
+                "-Draylib.path=/home/joe/.local/bin/odin/vendor/raylib/linux/libraylib.so.600"]
+   :extra-deps {nrepl/nrepl       {:mvn/version "1.7.0"}
+                cider/cider-nrepl {:mvn/version "0.62.2"}}
+   :main-opts  ["-m" "nrepl.cmdline"
+                "--middleware" "[cider.nrepl/cider-middleware]"]}}}

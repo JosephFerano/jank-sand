@@ -1,3 +1,5 @@
 target/
 _build/
 /.nrepl-port
+clojure/.cpcache
+clojure/.nrepl-port
