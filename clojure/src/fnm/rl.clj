@@ -65,6 +65,7 @@
 (defcfn end-drawing!   "EndDrawing"   [] ::mem/void)
 
 (defcfn draw-fps       "DrawFPS"      [::mem/int ::mem/int] ::mem/void)
+(defcfn get-fps        "GetFPS"       [] ::mem/int)
 
 (defcfn key-pressed?           "IsKeyPressed"          [::mem/int] ::bool)
 (defcfn mouse-button-down?     "IsMouseButtonDown"     [::mem/int] ::bool)

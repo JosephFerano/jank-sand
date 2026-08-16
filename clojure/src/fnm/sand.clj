@@ -1,5 +1,6 @@
 (ns fnm.sand
-  (:require [fnm.rl :as rl])
+  (:require [fnm.rl :as rl]
+            [fnm.watch :as w])
   (:import (java.lang.foreign MemorySegment ValueLayout)))
 
 (set! *warn-on-reflection* true)
@@ -23,8 +24,6 @@
 (defonce vel (float-array cell-count))
 (defonce state (atom {:color-idx 0}))
 
-;; The whole grid goes to the GPU as one cols x rows texture, scaled up to the
-;; window, so a full screen of sand is 1 draw call instead of 91,200.
 (defonce px (rl/alloc-pixels cell-count))
 (defonce gpu (atom nil))
 
@@ -129,19 +128,17 @@
     (rl/draw-texture-pro!* tex src dst origin (float 0.0) rl/white)
     (rl/draw-fps 20 20)))
 
+(defonce last-error (atom nil))
+
 (defn frame []
   (handle-input!)
   (physics)
   (rl/begin-drawing!)
-  ;; finally, not catch: if we bail out of a half-drawn frame, rlgl still needs
-  ;; the begin/end pair or the next frame inherits corrupt state.
   (try (draw)
-       (finally (rl/end-drawing!))))
-
-;; Throwable, not Exception: quitting the CIDER debugger aborts the eval by
-;; throwing, and that unwinds all the way out of the loop. Stash it here so it
-;; isn't swallowed silently by the future in the comment block below.
-(defonce last-error (atom nil))
+       (finally (rl/end-drawing!)))
+  (w/watch! {:mouse     (rl/get-mouse-position)
+             :color-idx (:color-idx @state)
+             :error     @last-error}))
 
 (defn -main [& _args]
   (rl/set-trace-log-level! rl/log-warning)
